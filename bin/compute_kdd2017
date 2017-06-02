@@ -1,0 +1,1708 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from sklearn import linear_model
+import numpy as np
+
+from argparse import RawTextHelpFormatter
+import argparse
+import json
+from datetime import timedelta
+from datetime import datetime
+import dateutil
+import copy
+import os
+import matplotlib.pyplot as plt
+import matplotlib
+import sys, traceback
+
+from kdd2017.utils import load_travel_times_from_trajectories
+from kdd2017.utils import convert_into_X_y
+from kdd2017.utils import mape_loss
+from kdd2017.utils import inv_mape_loss
+from kdd2017.utils import GridSearchCVDates
+from kdd2017.utils import invboxcox
+from kdd2017.utils import plot_travel_times_fix_date
+from kdd2017.utils import plot_travel_times_fix_hour
+from sklearn import linear_model
+from kdd2017.utils import GridSearchCVDatesWithVal
+
+from kdd2017.utils import remove_outliers
+from kdd2017.utils import load_weather_info
+
+from scipy.stats import boxcox
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.ensemble import BaggingRegressor
+from sklearn.ensemble import AdaBoostRegressor
+from sklearn.ensemble import ExtraTreesRegressor
+from sklearn.ensemble import RandomForestRegressor
+
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neighbors import RadiusNeighborsRegressor
+
+from sklearn.linear_model import Lasso
+
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import ARDRegression
+from sklearn.linear_model import HuberRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.linear_model import PassiveAggressiveRegressor
+from sklearn.linear_model import RandomizedLogisticRegression
+from sklearn.linear_model import RANSACRegressor
+from sklearn.linear_model import SGDRegressor
+from sklearn.linear_model import TheilSenRegressor
+from sklearn.linear_model import logistic_regression_path
+from sklearn.model_selection import train_test_split
+
+
+from sklearn.neural_network import MLPRegressor
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.svm import SVR
+from sklearn.svm import LinearSVR
+from sklearn.svm import NuSVR
+
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.tree import ExtraTreeRegressor
+
+
+from sklearn.pipeline import FeatureUnion
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest
+
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVR
+from sklearn.metrics import r2_score
+from sklearn.metrics import make_scorer
+from sklearn.metrics import mean_absolute_error
+from kdd2017.models import *
+import itertools
+
+import matplotlib.pyplot as plt
+import matplotlib
+import collections
+
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.isotonic import IsotonicRegression
+
+from kdd2017.utils import findsubsets
+from kdd2017.utils import findsubsets2
+
+from kdd2017.utils import load_routes
+from kdd2017.utils import load_links
+#from kdd2017.remove_outliers import remove_outliers_by_classifier
+#global_variables = {}
+
+if __name__ == "__main__":
+    description='''
+        compute_kdd2017 /media/jl237561/usb_ext/workspace/kdd2017/kdd2017/config/config.json
+    '''
+    parser = argparse.ArgumentParser(
+        description=description,
+        formatter_class=RawTextHelpFormatter)
+
+    parser.add_argument('config', type=unicode, nargs=1,
+                        help='...')
+
+    options = parser.parse_args()
+
+    if not options.config:
+        raise ValueError("Please set all the parameters.")
+
+    config_path = options.config[0]
+    config = json.load(open(config_path, "r"))
+    path_trajectories_train = config["path_trajectories_train"]
+    path_trajectories_val = config["path_trajectories_val"]
+    path_working_dir = config["working_dir"]
+    path_weather_infos = config["weather_infos"]
+    path_links = config["path_links"]
+    path_routes = config["path_routes"]
+
+    #path_combine_model_cache = os.path.join(path_working_dir, "cache_combine_model_%d.json" % random.randint(0, 1000))
+    #if os.path.isfile(path_combine_model_cache):
+    #    raise ValueError("cache exist.. please remove %s" % path_combine_model_cache)
+    #global global_variables
+    #global_variables["cache_combine_model"] = {}
+
+    datetime_weather = load_weather_info(path_weather_infos)
+    routes_data = load_routes(path_routes)
+    link_data = load_links(path_links)
+
+    if not os.path.isdir(path_working_dir):
+        os.makedirs(path_working_dir)
+
+    test_date_ranges = None
+    #test_date_ranges.append((datetime(2016, 10, 11, 23, 40), datetime(2016, 10, 18, 23, 40)))
+    #test_date_ranges.append((datetime(2016, 9, 20, 23, 40), datetime(2016, 9, 27, 23, 40)))
+    #test_date_ranges.append((datetime(2016, 9, 1, 23, 40), datetime(2016, 9, 8, 23, 40)))
+
+    estimate_val_w=1.0
+    n_cores=3
+    is_estimate_val = False
+    skip_cvs = []
+    is_y_log = False
+    is_boxcox = False
+    is_include_val_loss_for_eval = is_estimate_val
+    is_include_future_training = False
+    remove_future_training_test = not is_include_future_training
+    #remove_future_training_test = True
+    skip_date_ranges = [
+        #(datetime(2016, 9, 14), datetime(2016, 9, 16)),
+        #(datetime(2016, 9, 14), datetime(2016, 9, 19)),
+        #(datetime(2016, 10, 13), datetime(2016, 10, 14)),
+        #(datetime(2016, 9, 30), datetime(2016, 10, 1)),
+    ]
+    boxcox_lambda = -1.0
+    travel_times_train = load_travel_times_from_trajectories(
+        path_trajectories_train, skip_date_ranges=[], load_frequent_info=False)
+
+    #plot_travel_times_fix_hour(path_working_dir, travel_times_train)
+    #plot_travel_times_fix_date(path_working_dir, travel_times_train)
+    travel_times_val = load_travel_times_from_trajectories(
+        path_trajectories_val, skip_date_ranges=[], load_frequent_info=False)
+
+    X_train, y_train, dates_train, les_train = convert_into_X_y(
+        travel_times_train, datetime_weather, link_data, routes_data, )
+
+    X_val, y_val, dates_val, _ = convert_into_X_y(
+        travel_times_val, datetime_weather, link_data, routes_data, les_train, is_skip_not_trainning_hours=False)
+
+    route_ids = set()
+    for route_id in travel_times_train:
+        route_ids.add(route_id)
+    route_ids = list(route_ids)
+    travel_times_predict = collections.OrderedDict()
+    finnal_predict_times1 = [
+                                (datetime(2016,10,i,8), datetime(2016,10,i,10))
+                                for i in range(25, 32)
+                            ]
+    finnal_predict_times2 = [
+                                (datetime(2016,10,i,17), datetime(2016,10,i,19))
+                                for i in range(25, 32)
+                            ]
+    finnal_predict_times = finnal_predict_times1 + finnal_predict_times2
+    for route_id in route_ids:
+        travel_times_predict[route_id] = collections.OrderedDict()
+        predict_datetimes = []
+        for time_range in finnal_predict_times:
+            start_datetime = time_range[0]
+            end_datetime = time_range[1]
+            cur_datetime = start_datetime
+            while cur_datetime < end_datetime:
+                predict_datetimes.append(cur_datetime)
+                cur_datetime = cur_datetime + timedelta(minutes=20)
+        for predict_datetime in predict_datetimes:
+            travel_times_predict[route_id][predict_datetime] = [0, ]
+    print("*" * 60)
+    X_final, y_final, dates_final, _, raw_info = convert_into_X_y(
+        travel_times_predict, datetime_weather, link_data, routes_data, les_train, True, verbose=False)
+
+    Configurations = [
+        #{
+        #    "model": BoxcoxModel,
+        #    "tuned_parameters": [
+        #        {
+        #           "model": [GradientBoostingRegressor],
+        #           "loss": ["lad"],
+        #           "learning_rate": [0.1,],
+        #           "n_estimators": [200,],
+        #           "is_boxcox": [True, ],
+        #           "boxcox_lambda": [-1.0, -0.6, -0.3, 0, 0.1, 0.5, 1.0, 2.0],
+        #        },
+        #        {
+        #           "model": [GradientBoostingRegressor,],
+        #           "loss": ["lad"],
+        #           "learning_rate": [0.1,],
+        #           "n_estimators": [200,],
+        #           "is_boxcox": [False, ],
+        #           "boxcox_lambda": [1,],
+        #        },
+        #   ],
+        #},
+        #{
+        #    "model": XGBoost,
+        #    "tuned_parameters": [],
+        #},
+#        {
+#            "model": GradientBoostingRegressor,
+#            "tuned_parameters":[
+#                {
+#                    "n_estimators": [50, ],
+#                    "criterion": ["mae", "mse", "friedman_mse",],
+#                    "verbose": [3, ],
+#                    'loss': ['ls', 'lad', 'huber', 'quantile', ],
+#                },
+#            ],
+#        },
+
+### CombineModels.... final models..
+        {
+            "model": CombineModes,
+            "tuned_parameters": [
+                {
+                    'models': [
+                        [
+                            ## global
+                            ## 1
+                            DaterangeModel(
+                                model=MedianModel,
+                                train_days=19,
+                                ft_pos=[0, 1, 3, 5],
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 2, 4, 5, 7],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1, 
+                            ),
+                            ## 2
+                            DaterangeModel(
+                                model=LGBM,
+                                rm_n_head_days=0,
+                                # subsample=0.6, not necessary
+                                colsample_bytree=0.8,
+                                learning_rate=0.1,
+                                num_leaves=8,
+                                ft_select=[0, 1, 2, 4, 5, 7, 9, 10],
+                                n_estimators=1000,
+                                ft_th=[(9, 0.25), (10, 0.55)],
+                                objective="regression",
+
+                                train_days=50,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                is_rm_outliers=True,
+                                rm_outliers_key=[0,1,2,],
+                                rm_outliers_m=4.0,
+                                is_avg_or_median=1,
+                            ),
+                            ## 3
+                            DaterangeModel(
+                                model=LGBM,
+                                rm_n_head_days=0,
+                                # subsample=0.6, not necessary
+                                colsample_bytree=0.8,
+                                learning_rate=0.1,
+                                num_leaves=8,
+                                ft_select=[0, 1, 2, 3],
+                                n_estimators=200,
+                                ft_th=[(9, 0.25), (10, 0.55)],
+                                objective="regression",
+
+                                train_days=21,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                is_rm_outliers=True,
+                                rm_outliers_key=[0,1,2,],
+                                rm_outliers_m=4.0,
+                                is_avg_or_median=1,
+                            ),
+                            ### 4
+                            DaterangeModel(
+                                model=NonparametricKNN,
+                                train_days=21,
+                                n_neighbors=3,
+                                loss="SMAPE",
+                                ft_th=[
+                                         (9, 0.25),
+                                         (10, 0.55),
+                                         #(11, i/100.0),
+                                      ],
+                                random_state=0,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #is_one_hot_encode=is_one_hot_encode,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 3, 4],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1,
+                            ), 
+                            ### 5
+                            DaterangeModel(
+                                model=NonparametricKNN,
+                                train_days=50,
+                                n_neighbors=5,
+                                loss="SMAPE",
+                                ft_th=[
+                                         (9, 0.25),
+                                         (10, 0.55),
+                                         #(11, i/100.0),
+                                      ],
+                                random_state=0,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #is_one_hot_encode=is_one_hot_encode,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 2, 4, 5, 7, 12, 13, 14, 15, 16, 17, 18],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1,
+                            ), 
+                            ### 6
+                            DaterangeModel(
+                                model=NonparametricKNN,
+                                train_days=90,
+                                n_neighbors=7,
+                                loss="L2",
+                                ft_th=[
+                                         (9, 0.25),
+                                         (10, 0.55),
+                                         #(11, i/100.0),
+                                      ],
+                                random_state=0,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #is_one_hot_encode=is_one_hot_encode,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 3, 4],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1,
+                            ),
+                            #### 7
+                            DaterangeModel(
+                                model=NonparametricKNN,
+                                train_days=50,
+                                n_neighbors=5,
+                                loss="L1",
+                                ft_th=[
+                                         (9, 0.25),
+                                         (10, 0.55),
+                                         #(11, i/100.0),
+                                      ],
+                                random_state=0,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #is_one_hot_encode=is_one_hot_encode,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 3, 4],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1,
+                            ), 
+                            #### 8
+                            DaterangeModel(
+                                model=MLPRegressor,
+                                train_days=21,
+                                early_stopping=True,
+                                ft_th=[
+                                         (9, 0.25),
+                                         (10, 0.55),
+                                         #(11, i/100.0),
+                                      ],
+                                random_state=0,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #is_one_hot_encode=is_one_hot_encode,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 2, 4, 5, 7, 9],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1,
+                            ), 
+                            #### 9
+                            DaterangeModel(
+                                model=KNeighborsRegressor,
+                                train_days=21,
+                                n_neighbors=5,
+                                ft_th=[
+                                         (9, 0.25),
+                                         (10, 0.55),
+                                         #(11, i/100.0),
+                                      ],
+                                random_state=0,
+                                is_y_log=True,
+                                y_log_e=np.e,
+                                #is_one_hot_encode=is_one_hot_encode,
+                                #ft_pos=[0, 1, 3, 5],
+                                ft_select=[0, 1, 2, 4, 5, 7, 9],
+                                is_rm_outliers=True,
+                                rm_outliers_m=4.0,
+                                rm_outliers_key=[0, 1, 2, ],
+                                is_avg_or_median=1,
+                            ), 
+                            ### 10
+                            DaterangeModel(
+                                model=GradientBoostingRegressor,
+                                ft_select=[0, 1, 2, 4, 5, 7, 9],
+                                rm_n_head_days=0,
+                                rm_n_head_days_hours=[(0, 6), (12, 15), (21, 22)],
+                                n_estimators=200,
+                                loss='ls',
+                                is_y_log=True,
+                                y_log_e=3.0,
+                                learning_rate=0.15,
+                                train_days=90,
+                                is_rm_outliers=True,
+                                rm_outliers_key=[0,1,2,],
+                                rm_outliers_m=4.0,
+                                max_depth=3,
+                                is_sample_weight=29,
+                            ), 
+                            #DaterangeModel(
+                            #    model=GradientBoostingRegressor,
+                            #    ft_select=ft_select,
+                            #    rm_n_head_days=0,
+                            #    rm_n_head_days_hours=[(0, 6), (12, 15), (21, 22)],
+                            #    n_estimators=200,
+                            #    loss='ls',
+                            #    is_y_log=True,
+                            #    y_log_e=3.0,
+                            #    learning_rate=0.15,
+                            #    train_days=model_day,
+                            #    is_rm_outliers=True,
+                            #    rm_outliers_key=[0,1,2,],
+                            #    rm_outliers_m=4.0,
+                            #    max_depth=3,
+                            #    is_sample_weight=29,
+                            #),
+                            #### 11
+                            #DaterangeModel(
+                            #    model=XGBoost,
+                            #    ft_select=ft_select,
+                            #    num_round=6000,
+                            #    early_stopping_rounds=10,
+                            #    eta=0.02,
+                            #    colsample_bytree=0.9,
+                            #    subsample=0.6,
+                            #    max_depth=3,
+                            #    eval_metric='rmse',
+                            #    objective='reg:gamma',
+                            #    rm_n_head_days=0,
+                            #    n_estimators=200,
+                            #    booster='gbtree',
+
+                            #    is_y_log=True,
+                            #    y_log_e=3.0,
+                            #    train_days=model_day,
+                            #    is_rm_outliers=True,
+                            #    rm_outliers_key=[0,1,2,],
+                            #    rm_outliers_m=4.0,
+                            #), 
+                            ### 12
+                           #DaterangeModel(
+                            #    model=LGBM,
+                            #    rm_n_head_days=0,
+                            #    # subsample=0.6, not necessary
+                            #    colsample_bytree=0.8,
+                            #    learning_rate=0.1,
+                            #    num_leaves=8,
+                            #    ft_select=ft_select,
+                            #    n_estimators=200,
+                            #    ft_th=[(9, 0.25), (10, 0.55)],
+                            #    objective="regression",
+
+                            #    train_days=model_day,
+                            #    is_y_log=True,
+                            #    y_log_e=np.e,
+                            #    is_rm_outliers=True,
+                            #    rm_outliers_key=[0,1,2,],
+                            #    rm_outliers_m=4.0,
+                            #    is_avg_or_median=1,
+                            #),
+                         ]
+                         #for n_neighbors in [3, 5, 7]
+                         #for num_leaves in [8, 16, 32]
+#                        ## LGBM
+#                        #for loss in ["SMAPE", "L1", "L2"]
+#                        #for loss in ["lad"]
+#                        for n_neighbors in range(3, 5, 7)
+#                        for model in [ LGBM,
+#                                       #MedianModel
+#                                       #GradientBoostingRegressor, 
+#                                       #NonparametricKNN,
+#                                       #KNeighborsRegressor,
+#                                       #MLPRegressor,               
+#                                       #HuberRegressor, PassiveAggressiveRegressor, RANSACRegressor, SGDRegressor, 
+#                                       #TheilSenRegressor,
+#                                       #RadiusNeighborsRegressor, PLSRegression, LinearSVR, #NuSVR,
+#                                     ]
+                         #for model_day in range(7, 90, 3)
+#                        #for is_one_hot_encode in [True, False]
+                         #for model_day in [21, 50, 90]
+#                        for objective in ["regression", "regression_l2", "regression_l1", "huber", "fair", "poisson"]
+#                        #for ft_select in [range(10)]
+#                        #for ft_pos in [[0,1] + list(one) for one in findsubsets2(range(4, 8))]
+                         #for ft_select in list( [[0, 1, ] + list(one) for one in findsubsets2(range(2, 10))])
+                        #for ft_select in [[0, 1, 2, 4, 5, 7, 9, 10],]
+                         #for ft_select in [[0, 1, 2, 4, 5, 7, 9], [0, 1, 2, 4, 5, 7] + range(12, 19), [0, 1, 2, 3], [0, 1, 2, 6], [0, 1, 3, 4], [0, 1, 2, 4, 5, 7],]
+#                        #for ft_select in [[0, 1, 2, 4, 5, 7] + range(19, 43), ]
+                     ],
+                     #'subsample': [0.6, 0.7, 0.8, 0.9, 1.0],
+                     'subsample': [1.0, ],
+                     'combine_method': [2,],
+                     'weights': [
+                         [0.4, 1.4, 1.1, 1.0, x1/100.0, x2/100.0, 0.4, 0.1, 0.5, 1.2]  
+                         for x1 in range(0, 201, 10)
+                         for x2 in range(0, 201, 10)
+                     ],
+                },
+            ],
+        },
+#### CombineModels.... final models..
+#        {
+#            "model": CombineModes,
+#            "tuned_parameters": [
+#                {
+#                    'models': [
+#                        [
+#                            ## global
+#                            ## 1
+#                            DaterangeModel(
+#                                model=GradientBoostingRegressor,
+#                                ft_select=[0, 1, 2, 4, 5, 7,],
+#                                rm_n_head_days=10,
+#                                rm_n_head_days_hours=[(0, 6), (12, 15), (21, 22)],
+#                                n_estimators=200,
+#                                loss='ls',
+#                                is_y_log=True,
+#                                y_log_e=3.0,
+#                                learning_rate=0.15,
+#                                train_days=50,
+#                                is_rm_outliers=True,
+#                                rm_outliers_key=[0,1,2,],
+#                                rm_outliers_m=4.0,
+#                                max_depth=3,
+#                                is_sample_weight=29,
+#                            ),
+#                            # 2
+#                            DaterangeModel(
+#                                model=MedianModel,
+#                                train_days=19,
+#                                ft_pos=[0, 1, 3, 5],
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ),
+#                            # 3
+#                            DaterangeModel(
+#                 
+#                                train_days=23,
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ),
+#                            # 4
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                train_days=10,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ), 
+#                            # 5
+#                            DaterangeModel(
+#                                model=MLPRegressor,
+#                                train_days=35,
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ),
+#                            # 6
+#                            DaterangeModel(
+#                                model=TheilSenRegressor,
+#                                train_days=30,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ),
+#                            # 7 
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                train_days=60,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ), 
+#                            # 8  ## start to mix different features
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                train_days=14,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1, 
+#                            ), 
+#                            # 9
+#                            DaterangeModel(
+#                                model=MLPRegressor,
+#                                train_days=56,
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                ft_select=[0, 1, 3, 4, 7],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 10
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                train_days=21,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ),
+#                            ## 11
+#                            DaterangeModel(
+#                                model=MLPRegressor,
+#                                train_days=7,
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 6],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 12
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                n_neighbors=6,
+#                                train_days=84,
+#                                #random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 3],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ),
+#                            ## 13
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                n_neighbors=4,
+#                                train_days=63,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                #random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7, 9],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 14
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                train_days=49,
+#                                n_neighbors=3,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7] + range(12, 19),
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 15
+#                            DaterangeModel(
+#                                model=KNeighborsRegressor,
+#                                train_days=70,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ),
+#                            ## 16
+#                            DaterangeModel(
+#                                model=NonparametricKNN,
+#                                train_days=28,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #is_one_hot_encode=is_one_hot_encode,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 17
+#                            DaterangeModel(
+#                                model=NonparametricKNN,
+#                                train_days=14,
+#                                n_neighbors=3,
+#                                loss="SMAPE",
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #is_one_hot_encode=is_one_hot_encode,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 18
+#                            DaterangeModel(
+#                                model=NonparametricKNN,
+#                                train_days=56,
+#                                n_neighbors=3,
+#                                loss="L1",
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #is_one_hot_encode=is_one_hot_encode,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 2, 4, 5, 7, 9],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 19
+#                            DaterangeModel(
+#                                model=NonparametricKNN,
+#                                train_days=50,
+#                                #loss=loss,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #is_one_hot_encode=is_one_hot_encode,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            ## 20
+#                            DaterangeModel(
+#                                model=LGBM,
+#                                train_days=21,
+#                                #loss=loss,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #is_one_hot_encode=is_one_hot_encode,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=[0, 1, 3, 4, 5, 6],
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                            DaterangeModel(
+#                                model=model,
+#                                train_days=model_day,
+#                                #eval_metric="rmse",
+#                                #early_stopping_rounds=10,
+#                                #num_round=6000,
+#                                #booster='gbtree',
+#                                #colsample_bytree=0.9,
+#                                #objective="reg:gamma",
+#                                #subsample=0.6,
+#                                #eta=0.02,
+#                                #max_depth=3,
+#                                learning_rate=0.1,
+#                                n_estimators=1200,
+#                                num_leaves=8,
+#                                colsample_bytree=0.8,
+#                                subsample=0.9,
+#                                objective=objective,
+#                                #loss=loss,
+#                                ft_th=[
+#                                         (9, 0.25),
+#                                         (10, 0.55),
+#                                         #(11, i/100.0),
+#                                      ],
+#                                random_state=0,
+#                                is_y_log=True,
+#                                y_log_e=np.e,
+#                                #is_one_hot_encode=is_one_hot_encode,
+#                                #ft_pos=[0, 1, 3, 5],
+#                                ft_select=ft_select,
+#                                is_rm_outliers=True,
+#                                rm_outliers_m=4.0,
+#                                rm_outliers_key=[0, 1, 2, ],
+#                                is_avg_or_median=1,
+#                            ), 
+#                        ]
+#                        ## LGBM
+#                        #for loss in ["SMAPE", "L1", "L2"]
+#                        #for loss in ["lad"]
+#                        ##for n_neighbors in range(3, 5, 7)
+#                        for model in [ LGBM,
+#                                       #MedianModel
+#                                       #GradientBoostingRegressor, 
+#                                       #NonparametricKNN,
+#                                       #KNeighborsRegressor,
+#                                       #MLPRegressor,               
+#                                       #HuberRegressor, PassiveAggressiveRegressor, RANSACRegressor, SGDRegressor, 
+#                                       #TheilSenRegressor,
+#                                       #RadiusNeighborsRegressor, PLSRegression, LinearSVR, #NuSVR,
+#                                     ]
+#                        #for model_day in range(7, 90, 3)
+#                        #for is_one_hot_encode in [True, False]
+#                        for model_day in [21, 50]
+#                        for objective in ["regression", "regression_l2", "regression_l1", "huber", "fair", "poisson"]
+#                        #for ft_select in [range(10)]
+#                        #for ft_pos in [[0,1] + list(one) for one in findsubsets2(range(4, 8))]
+#                        for ft_select in list( [[0, 1, ] + list(one) for one in findsubsets2(range(2, 8))])
+#                        #for ft_select in [[0, 1, 2, 4, 5, 7, 9, 10],]
+#                        #for ft_select in [[0, 1, 2, 4, 5, 7, 9], [0, 1, 2, 4, 5, 7] + range(12, 19), [0, 1, 2, 3], [0, 1, 2, 6], [0, 1, 3, 4], [0, 1, 2, 4, 5, 7],]
+#                        #for ft_select in [[0, 1, 2, 4, 5, 7] + range(19, 43), ]
+#                     ],
+#                     #'subsample': [0.6, 0.7, 0.8, 0.9, 1.0],
+#                     'subsample': [1.0, ],
+#                     'combine_method': [2,],
+#                     'weights': [
+#                         #[1.0, 0.25, 0.05, 0.5, 0.1, 0.05, 0.1, 0.3, 0.8, 0.25, 0.2, 0.35, 0.25, 0.1, ]
+#                         [1.0, 0.25, 0.05, 0.5, 0.1, 
+#                          0.05, 0.1, 0.3, 0.8, 0.25, 
+#                          0.2, 0.6, 0.25, 0.2, 0.2, 
+#                          0.25, 1.0, 0.3, 0.25, 0.9,
+#                         x1/100.0]  #for x1 in range(0, 201, 10)
+#                         #[1.0, x1/100.0, x2/100.0, x3/100.0, x4/100.0, x5/100.0, x6/100.0, x7/100.0, x8/100.0, x9/100.0, x10/100.0, x11/100.0, x12/100.0, x13/100.0, ] #x1/100.0,  ] # x1/100.0]
+#                         for x1 in range(0, 101,  5) 
+#                         #for x2 in range(0, 101,  10) 
+#                         #for x3 in range(0, 101,  5)
+#                         #for x4 in range(0, 101,  50) 
+#                         #for x5 in range(0, 101,  50) 
+#                         #for x6 in range(0, 101,  50)
+#                         #for x7 in range(0, 101,  50)
+#                         #for x8 in range(0, 101,  50)
+#                         #for x9 in range(0, 101,  50)
+#                         #for x10 in range(0, 101, 50) 
+#                         #for x11 in range(0, 101, 50) 
+#                         #for x12 in range(0, 101, 50)
+#                         #for x13 in range(0, 101, 50)
+#                         #[1.0, 0.31, 0.2, 0.35, 0.05, 0.05],
+#                         #[1.0, 0.25, 0.2, 0.4, 0.05, 0.05] ## 0.17551018223761861,
+#                         #[1.0, 0.25, 0.25, 0.5, 0.0, 0.0] ## 0.17573313467167548,
+#                         #[1.0, 0.25, 0.2, 0.4, 0.0, 0.0] ## 0.17566198457914264,
+#                         #[1.0, 0.15, 0.1, 0.1, 0.0]
+#                     ],
+#                },
+#            ],
+#        },
+        {
+            "model": DaterangeModel,
+             
+            "tuned_parameters": [
+#              { ## baseline
+#                 'model':[GradientBoostingRegressor,],
+#                 'n_estimators': [200,],
+#                 'is_y_log': [True,],
+#                 'ft_select': [[0, 1, 2, 4, 5, 7, ], ],
+#                 'y_log_e': [3.0, ],
+#                 'norm_y': [False, ],
+#                 'loss': ["ls", ],
+#                 'learning_rate': [0.15, ],
+#                 'train_days': [43, ],
+#                 'is_rm_outliers': [True,],
+#                 'max_depth': [3, ],
+#                 'criterion': ['friedman_mse', ],
+#                 'rm_outliers_m': [4.0, ],
+#                 'rm_outliers_key': [[0, 1, 2, ], ],
+#                 'is_avg_or_median': [1, ],
+#                 'anova_filter': [0],
+#                 'is_one_hot_encode': [False,],
+#              },
+
+#              { ## tune val part
+#                 'model':[GradientBoostingRegressor,],
+#                 'n_estimators': [200,],
+#                 'is_y_log': [True,],
+#                 'ft_select': [[0, 1, 2, 4, 5, 7], ],
+#                 'y_log_e': [3.0, ],
+#                 'norm_y': [False, ],
+#                 'loss': ["ls", ],
+#                 'learning_rate': [0.15, ],
+#                 'train_days': [43, ],
+#                 'is_rm_outliers': [True,],
+#                 'max_depth': [3, ],
+#                 'criterion': ['friedman_mse', ],
+#                 'rm_outliers_m': [4.0, ],
+#                 'rm_outliers_key': [[0, 1, 2, ], ],
+#                 'is_avg_or_median': [1, ],
+#                 'anova_filter': [0],
+#                 'is_one_hot_encode': [False,],
+#              },
+#              {
+#                 'model':[Pipeline,],
+#                 'models':[[
+#                             GradientBoostingRegressor(n_estimators=200,  loss='ls', learning_rate=0.1, subsample=0.9, max_depth=2),
+#                             GradientBoostingRegressor(n_estimators=200,  loss='ls', learning_rate=0.1, max_depth=4),
+#                          ]],
+#                 'is_y_log': [True, ],
+#                 'ft_select': [[0, 1, 2, 4, 5, 7,],],
+#                 'train_days': range(20, 90, 1),
+#              },
+#              {
+#                 'model':[GradientBoostingRegressor,],
+#                 'is_ignore_skip_date_count': [True,],
+#                 'n_estimators': [200,],
+#                 #'rm_n_head_days': range(31),
+#                 #'rm_n_head_days': [10, ],
+#                 'rm_n_head_days': [4, ],
+#                 'rm_n_head_days_hours': [
+#                     #[],
+#                     #[(0, 6), (21, 22)],
+#                     #[(0, 5), (12, 15), (22, 24)],
+#                     #[(0, 6), (12, 15), (21, 22)], ### 0.1750 public leader board
+#                     #[(0, 7), (11, 16), (20, 24)],
+#                     [(0, 7), (12, 15), (22, 24)],
+#                     #[one, two , three]
+#                     #[(0, 7), (11, 16), (20, 22)], ### 
+#                     #[(0, 8), (10, 17), (19, 22)],
+#                     #for one in [(0, 6), (0, 5), (0, 7), (0, 8),]
+#                     #for two in [(10, 17), (11, 16), (12, 14), ]
+#                     #for three in [(19, 24), (20, 24), (21, 24), (22, 24)]
+#                 ],
+#                 #'is_boxcox': [True,],
+#                 #'boxcox_lambda': [-5.0, -4.0, -3.0, -2.0, -1.0, -0.5, ],
+#                 'is_y_log': [True, ],
+#                 #'ft_select': list([[0, 1, ] + list(one) for one in findsubsets2(set(range(2, 8)))]),
+#                 'ft_th': [[
+#                             #(9, 0.5),
+#                             (10, 0.3),
+#                             #(11, i/10.0),
+#                             #(42, i/10.0),
+#                           ]  #for i in range(0, 11, 1)
+#                          ],
+#                 'ft_select': [
+#                     #[0, 1, 2, 4, 5, 7, ],
+#                    [0, 1, 2, 4, 5, 7, ],
+#                     #[0, 1, 2, 4, 5, 7, 42],
+#                     #[0, 1, 2, 4, 5, 7, 9, 10, ] + range(19, 43),
+#                 ],
+#                 #'remove_outliers_by_classifier': [
+#                 #    {
+#                 #        "model": GradientBoostingRegressor(
+#                 #           max_depth=x,
+#                 #        ),
+#                 #        "m": v/100.,
+#                 #    }
+#                 #    for v in range(80, 101, 1) for x in range(2,5)
+#                 #],
+#                 #'ft_select': [range(8)],
+#                 #'ft_select': [[0, 1] + list(one) for one in findsubsets2(set(range(2, 8)))],
+#                 #'ft_select': [range(8), [0, 1, 2, 4, 5, 7,] + range(12, 19)],
+#                 #'ft_weights': [[1, 1, 1, i/100.0, 1, 1, 1, 1, 1,] for i in range(0,101, 10) ],
+#                 #'ft_select': [[0, 1, 4, 6], [0, 1, 2, 3, 7], [0, 1, 2, 4, 5, 6, 7], [0, 1, 2, 4, 5, 7], [0, 1, 2, 3, 4, 5, 6, 7], ],
+#                 #'y_log_e': [2.0, np.e, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, ],
+#                 'y_log_e': [3.0, ],
+#                 #'max_features': ['sqrt', 'auto', 'log2', ],
+#                 #'max_leaf_nodes': [5, ],
+#                 #'max_leaf_nodes': [ 2, 3, 5, 10, 100, 1000, 10000, 100000, None,],
+#                 #'min_impurity_split': [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, ],
+#                 'norm_y': [False, ],
+#                 #'loss': ["ls", "huber", "quantile"],
+#                 'loss': ["ls", ],
+#                 #'learning_rate': [v/100.0 for v in range(1, 101, 1)],
+#                 'learning_rate': [0.15, ],
+#                 #'train_days': range(10, 90, 1),
+#                 #'train_days': range(35, 70),
+#                 'train_days': [50, ],
+#                 'is_rm_outliers': [True, ],
+#                 #'max_depth': range(2, 10),
+#                 'max_depth': [3, ],
+#                 'criterion': ['friedman_mse', ],
+#                 #'rm_outliers_m': [i/10.0 for i in range(5, 61, 5)],
+#                 'rm_outliers_m': [4.0, ],
+#                 #'rm_outliers_m': [2.5, ],
+#                 #'rm_outliers_key': [[0, 1, ] + list(one) for one in findsubsets2(set([2, 4, 6, 7,]), add_origin=False)],
+#                 #'rm_outliers_key': list(findsubsets2(set([0,1,2,3,4,5]))),
+#                 'rm_outliers_key': [[0, 1, 2, ], ],
+#                 #'rm_outliers_key': [[0, 1, 2], ],
+#                 #'is_avg_or_median': [1, 2],
+#                 'is_avg_or_median': [1,],
+#                 'anova_filter': [0],
+#                 'is_one_hot_encode': [False,],
+#                 #'remove_non_predict_hour_range': [True, ],
+#                 #'predict_hour_range':[
+#                 #     [
+#                 #          [[8, 0], [10, 0]],
+#                 #          [[17, 0], [19, 0]],
+#                 #     ],
+#                 #     #[
+#                 #     #     [[7, 0], [11, 0]],
+#                 #     #     [[16, 0], [20, 0]],    
+#                 #     #],
+#                 #], 
+#                 #'is_sample_weight': range(40),
+#                 'is_sample_weight': [29, ],
+#                 ## avoid overfitting....
+#                 #'max_features' : ["log2",],
+#                 #'subsample': [0.8, ],
+#                 #'max_features': [i/10.0 for i in range(1, 9)],
+#                 #'subsample': [0.9, ],
+#                 #'is_ft_union': [ FeatureUnion(
+#                 #                   [
+#                 #                       #("pca", PCA(n_components=1)),
+#                 #                       ("skb", SelectKBest(k=3)),
+#                 #                   ]
+#                 #                 ),
+#                 #               ],
+#                 'skip_date_ranges': [
+#                     #[
+#                     #  (datetime(2016, 10, i, 6), datetime(2016, 10, i, 8)) for i in range (11, 18)
+#                     #], 
+#                     #[
+#                     #  (datetime(2016, 10, i, 6), datetime(2016, 10, i, 8)) for i in range (4, 11)
+#                     #],  
+#                     #[
+#                     #  (datetime(2016, 9, 15) + timedelta(days=i), datetime(2016, 9, 15) + timedelta(days=i+1))
+#                     #] for i in range(30)
+#                     #[
+#                     #  (datetime(2016, 9, 14), datetime(2016, 9, 17)),
+#                     #  (datetime(2016, 9, 30), datetime(2016, 10, 3)),
+#                     #],
+#                     #[
+#                     #  (datetime(2016, 9, 30), datetime(2016, 10, 8)),
+#                     #],
+#                     #[
+#                     #  (datetime(2016, 9, 17), datetime(2016, 9, 18)),
+#                     #], 
+#                     #[
+#                     #  (datetime(2016, 10, 7), datetime(2016, 10, 8)),
+#                     #],
+#                     ##[
+#                     ##  (datetime(2016, 9, 15), datetime(2016, 9, 16)),
+#                     ##  (datetime(2016, 10, 7), datetime(2016, 10, 8)),
+#                     ##],
+#                     #[
+#                     #  (datetime(2016, 9, 14), datetime(2016, 9, 19)),
+#                     #  (datetime(2016, 9, 30), datetime(2016, 10, 10)),                       
+#                     #],
+#                     [],
+#                 ],
+#              },
+#              {
+#                 'model':[BaggingRegressor,],
+#                 'base_estimator': [
+#                                      GradientBoostingRegressor(
+#		                          n_estimators=50,
+#                                          learning_rate=0.15,
+# 					  loss='ls',
+#                                      ),
+#                                   ],
+#                 'n_estimators': [50,],
+#                 'is_y_log': [True,],
+#                 'y_log_e': [3.0, ],
+#                 'norm_y': [False, ],
+#                 #'train_days': [43, ],
+#                 'train_days': range(7, 60, 1),
+#                 'is_rm_outliers': [True,],
+#                 'rm_outliers_m': [4.0, ],
+#                 'rm_outliers_key': [[0, 1, 2,], ],
+#                 'is_avg_or_median': [1, ],
+#                 'anova_filter': [0],
+#                 'is_one_hot_encode': [False,],
+#              },
+#
+#              {
+#                 'model':[GradientBoostingRegressor,],
+#                 'n_estimators': [200,],
+#                 'loss': ["lad", ],
+#                 'learning_rate': [0.5,],
+#                 'train_days': [35, ],
+#                 'is_rm_outliers': [True,],
+#                 #'rm_outliers_m': [i/10.0 for i in range(5, 60, 5)],
+#                 'rm_outliers_m': [5.0],
+#                 'max_depth': [3, ],
+#                 # 'rm_outliers_key': list(findsubsets2(set([0,1,2,3,4,5]))),
+#                 'rm_outliers_key': [[2,3,4,],],
+#                 'is_avg_or_median': [True, ],
+#                 'is_ignore_skip_date_count': [True,],
+#              },
+#               {
+#                  'model':[LGBM,],
+#                  #'objective':["regression", "regression_l2", "regression_l1", "huber", "fair", "poisson"],
+#                  'objective':["fair", ],
+#                  'subsample': [i/10.0 for i in range(6, 11, 1)],
+#                  'use_mspe': [False],
+#                  #'use_mspe':[True, False],
+#                  #'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0],
+#                  'learning_rate': [0.1,],
+#                  #'drop_rate': [0.3, ],
+#                  #'max_bin': range(100, 400, 5),
+#                  #'boosting_type': ['gbdt', 'dart', ],
+#                  #'xgboost_dart_mode': [True, False,],
+#                  #'boosting_type': ['gbdt', ],
+#                  'xgboost_dart_mode':[False, ],
+#                  #'uniform_drop': [True, False],
+#                  'ft_th': [[
+#                              (9, 0.25),
+#                              (10, 0.55),
+#                              #(11, i/100.0),
+#                           ] ],
+#                  #'ft_th': [[
+#                  #            (9, 0.25),
+#                  #            (10, 0.5),
+#                  #            (11, 0.5),
+#                  #          ]
+#                  #         ],
+#                  #'max_bin': [100,],
+#                  'num_leaves': [8, ],
+#                  #'num_leaves': range(3, 60),
+#                  #'subsample': [i/10.0 for i in range(1, 11)],
+#                  #'colsample_bytree': [i/10.0 for i in range(5, 11)],
+#                  'colsample_bytree': [0.8, ],
+#                  #'lambda_l1': [],
+#                  'subsample': [0.9,],
+#                  'n_estimators': [200, ],
+#                  'is_y_log': [True, ],
+#                  'y_log_e': [np.e, ],
+#                  'norm_y': [False, ],
+#                  #'ft_select': [[0, 1, 2, 4, 5, 7], ],
+#                  'ft_select': [[0, 1, 2, 4, 5, 7, 9, 10], ],
+#                  #'ft_select': list([[0, 1, 2, 4, 5, 7, ] + list(one) for one in findsubsets2(set(range(12,19)))]),
+#                  'train_days': [49, ],
+#                  #'train_days': range(7, 90, 7),
+#                  'is_rm_outliers': [True, False],
+#                  #'rm_outliers_m': [i/10.0 for i in range(5, 60, 5)],
+#                  'rm_outliers_m': [4.0, ],
+#                  'rm_outliers_key': [[0, 1, 2, ], ],
+#                  #'rm_outliers_key': list(findsubsets2(set([0,1,2,3,4]))),
+#                  'is_avg_or_median': [1, ],
+#               },
+#               {
+#                 'model':[XGBoost,],
+#                 'rm_n_head_days': [0, ],
+#                 'rm_n_head_days_hours': [
+#                     #[],
+#                     [(0, 6), (12, 15), (21, 22)],
+#                     #[(0, 7), (11, 16), (20, 22)],
+#                     #[(0, 8), (10, 17), (19, 22)],
+#                 ],
+#                 'is_y_log': [True, ],
+#                 'use_mspe': [False],
+#                 #'y_log_e': [np.e, ] + [pow(10, i) for i in range(1, 10)],
+#                 #'y_log_e': [2.0, np.e, 3.0, 4.0, 5.0, 6.0, 7.0,],
+#                 'y_log_e': [np.e, ],
+#                 'norm_y': [False, ],
+#                 #'early_stopping_rounds' : [5, 8, 10, 12, 15],
+#                 'early_stopping_rounds' : [10, ],
+#                 #'gamma': [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0,],
+#                 #'eta': [v/10.0 for v in range(2, 6, 1)] + [v/100.0 for v in range(1, 11, 1)],
+#                 'eta': [0.02, ],
+#                 #'max_depth': range(3, 10),
+#                 #'min_child_weight': [1,3,5,7,],
+#                 #'colsample_bytree': [0.6, 0.7, 0.8, 0.9, 1.0],
+#                 'colsample_bytree': [0.9, ],
+#                 'max_depth': [3, ],
+#                 'eval_metric': ['rmse'],
+#                 #'eval_metric': ['mape'],
+#                 #'objective': ["reg:gamma", "reg:linear"],
+#                 'objective': ["reg:gamma", ],
+#                 #'subsample': [v/10.0 for v in range(5, 11)],
+#                 'subsample': [0.6, ],
+#                 'is_ignore_skip_date_count': [True, ],
+#                 'booster': ['gbtree', ],
+#                 #'ft_th': [[
+#                 #            #(9, 0.25),
+#                 #            #(10, 0.55),
+#                 #            #(11, 0.5),
+#                 #          ] #for i in range(0, 101, 5)
+#                 #         ],
+#                 'ft_select': [[0, 1, 2, 4, 5, 7, ]],
+#                 #'ft_norm': [range(3), [], ],
+#                 #'ft_select': [[0, 1, 2, 4, 5, 7], ],
+#                 #'ft_select': [[0, 1, 2, 4, 5, 7, i] for i in range(12, 19) ] + [[0, 1, 2, 4, 5, 7, ],],
+#                 #'ft_select': [[0, 1, 2, 3, 4, 5, 7], [0, 1, 2, 4, 5, 7], [0, 1, 2, 4, 5, 6, 7], ],
+#                 #'ft_select': list([[0, 1, 2, 4, 5, 7] + list(one) for one in findsubsets2(set(range(12, 19)))]),
+#                 #'ft_select': list([[0, 1, ] + list(one) for one in findsubsets2(set(range(2, 8)))]),
+#                 #'train_days': range(7, 91, 7),
+#                 'train_days': [50, ],
+#                 'is_rm_outliers': [True, ],
+#                 #'rm_outliers_m': [i/10.0 for i in range(5, 60, 5)],
+#                 'rm_outliers_m': [4.0, ],
+#                 #'rm_outliers_key': list(findsubsets2(set([0,1,2,3,4,5]))),
+#                 'rm_outliers_key': [[0, 1, 2, ], ],
+#                 'is_avg_or_median': [1, ],
+#                 #'is_sample_weight': range(5, 41, 1),
+#                 'is_sample_weight': [29, 0],
+#                 #'num_round': range(1000, 6001, 1000),
+#                 'num_round': [6000, ],
+#                 'skip_date_ranges': [
+#                     #[
+#                     #  (datetime(2016, 10, i, 6), datetime(2016, 10, i, 8)) for i in range (11, 18)
+#                     #], 
+#                     #[
+#                     #  (datetime(2016, 10, i, 6), datetime(2016, 10, i, 8)) for i in range (4, 11)
+#                     #],  
+#                     #[
+#                     #  (datetime(2016, 9, 15) + timedelta(days=i), datetime(2016, 9, 15) + timedelta(days=i+1))
+#                     #] for i in range(30)
+#                     #[
+#                     #  (datetime(2016, 9, 15), datetime(2016, 9, 16)),
+#                     #],
+#                     #[
+#                     #  (datetime(2016, 9, 14), datetime(2016, 9, 16)),
+#                     #],
+#                     #[
+#                     #  (datetime(2016, 9, 17), datetime(2016, 9, 18)),
+#                     #], 
+#                     #[
+#                     #  (datetime(2016, 10, 7), datetime(2016, 10, 8)),
+#                     #],
+#                     ##[
+#                     ##  (datetime(2016, 9, 15), datetime(2016, 9, 16)),
+#                     ##  (datetime(2016, 10, 7), datetime(2016, 10, 8)),
+#                     ##],
+#                     #[
+#                     #  (datetime(2016, 9, 14), datetime(2016, 9, 19)),
+#                     #  (datetime(2016, 9, 30), datetime(2016, 10, 10)),                       
+#                     #],
+#                     [],
+#                 ],
+#                 'remove_non_predict_hour_range': [False],
+#                 'predict_hour_range':[
+#                      [
+#                           [[7, 0], [11, 0]],
+#                           [[16, 0], [21, 0]],
+#                      ],
+#                      #[
+#                      #     [[7, 0], [11, 0]],
+#                      #     [[16, 0], [20, 0]],    
+#                      #],
+#                 ], 
+#              },
+              {
+                 'model':[MedianModel,],
+                 'is_y_log': [True,],
+                 'ft_pos':[[0, 1, 3, 5], ],
+                 'ft_select': [[0, 1, 2, 4, 5, 7], ],
+                 #'train_days': range(14, 90, 1),
+                 'train_days': [45, ],
+                 'is_rm_outliers': [True,],
+                 #'rm_outliers_m': [i/10.0 for i in range(5, 60, 5)],
+                 'rm_outliers_m': [4.0,],
+                 #'rm_outliers_key': list(findsubsets2(set([0,1,2,3,4]))),
+                 'rm_outliers_key': [[0,1,2], ],
+                 'is_avg_or_median': [1,],
+              },
+#              {
+#                 'model':[
+#                            #LinearRegression,
+#                            #ARDRegression,
+#                            HuberRegressor,
+#                            #LogisticRegression,
+#                            #LogisticRegressionCV,
+#                            PassiveAggressiveRegressor,
+#                            #RandomizedLogisticRegression,
+#                            RANSACRegressor,
+#                            SGDRegressor,
+#                            TheilSenRegressor,
+#                            KNeighborsRegressor,
+#                            RadiusNeighborsRegressor,
+#                            MLPRegressor,
+#                            PLSRegression,
+#                            SVR,
+#                            LinearSVR,
+#                            NuSVR,
+#                            Lasso,
+#                          ],
+#                 'is_y_log': [False, True],
+#                 'train_days': [14,],
+#              },
+#              {
+#                 'model':[
+#                            ExtraTreeRegressor,
+#                            AdaBoostRegressor,
+#                            BaggingRegressor,
+#                            RandomForestRegressor,
+#                          ],
+#                 'is_y_log': [False, True],
+#                 'train_days': range(7, 130, 7),
+#                 #'train_days': [56, ],
+#              },
+#              {
+#                 'model':[
+#                            AdaBoostRegressor,
+#                         ],
+#                 'loss': ['linear', ],
+#                 'is_y_log': [True,],
+#                 'y_log_e': [3.0,],
+#                 #'train_days': range(14, 130, 7),
+#                 'train_days': [35, ],
+#                 #'train_days': [43, ],
+#                 'is_rm_outliers': [True,],
+#                  #'rm_outliers_m': [i/10.0 for i in range(5, 60, 5)],
+#                  'rm_outliers_m': [2.0, ],
+#              },
+#              {
+#                'model': [RandomForestRegressor,BaggingRegressor,
+#                          AdaBoostRegressor,ExtraTreesRegressor,],
+#                'n_estimators': [50,],
+#                 'is_y_log': [False, True],
+#                 'train_days': [7,14,21],
+#                 'is_rm_outliers': [True,],
+#                 'rm_outliers_m': [0.5, 1.0, 2.0, 3.0, 4.0,],
+#              },
+#              {
+#                'model': [
+#                    CombineModes
+#                ],
+#                'models':[
+#                    [
+#                        DaterangeModel(model=GradientBoostingRegressor,
+#                                       n_estimators=200,
+#                                       is_y_log=True,
+#                                       y_log_e=3.0,
+#                                       loss='ls',
+#                                       learning_rate=0.15,
+#                                       train_days=43,
+#                                       is_rm_outliers=True,
+#                                       rm_outliers_m=4.0,
+#                                       max_depth=3,
+#                                       rm_outliers_key=[0,1,2,],
+#                                       is_avg_or_median=True,
+#                                       dates_train=copy.deepcopy(dates_train),
+#                                       ),
+#                        DaterangeModel(model=GradientBoostingRegressor,
+#                                       n_estimators=200,
+#                                       loss='lad',
+#                                       learning_rate=0.1,
+#                                       train_days=35,
+#                                       is_rm_outliers=True,
+#                                       rm_outliers_m=4.0,
+#                                       max_depth=3,
+#                                       rm_outliers_key=[0,1,2,],
+#                                       is_avg_or_median=True,
+#                                       dates_train=copy.deepcopy(dates_train),
+#                                       ),
+#                    ],
+#                ],
+#                'weights':[
+#                    [
+#                        0.8,
+#                        0.2,
+#                    ],
+#                    [
+#                        0.9,
+#                        0.1,
+#                    ],
+#                    [
+#                        0.7,
+#                        0.3,
+#                    ],
+#                    [
+#                        0.6,
+#                        0.4,
+#                    ],
+#
+#                ],
+#                'train_days': [200,],
+#                'dates_train': [copy.deepcopy(dates_train),],
+#              },
+#              {
+#                  "model": [SVR,],
+#                  "ft_select": [[0, 1, 2, 4, 5, 7,],],
+#                  "kernel": ['rbf', ],
+#                  'C': [1000,  ],
+#                  'gamma': [0.001, ],
+#                  'is_y_log': [True,],
+#                  #'train_days': range(3, 60, 2),
+#                  'train_days': [41,],
+#                  'is_one_hot_encode': [True,],
+#                  'is_rm_outliers': [True,],
+#                  'rm_outliers_m': [ 4.0,],
+#                  'rm_outliers_key': [[0, 1, 2], ],
+#
+#              },
+#              {
+#                  "model": [Lasso,],
+#                  "ft_select": [[0, 1, 2, 4, 5, 7,],],
+#                  'is_y_log': [True,],
+#                  #'train_days': range(3, 60, 2),
+#                  'train_days': [1,2,3,7, 14, 28,],
+#                  'is_one_hot_encode': [True,],
+#                  'is_rm_outliers': [True,],
+#                  'rm_outliers_m': [ 4.0,],
+#                  'rm_outliers_key': [[0, 1, 2], ],
+#              },
+#              {
+#                 'model':[SVR,],
+#                 'train_days': [10],
+#                 'ft_select': [[0, 1, 2, 4, 5, 7], ],
+#                 'is_rm_outliers': [False,],
+#                 #'rm_outliers_m': [i/10.0 for i in range(5, 60, 5)],
+#                 'rm_outliers_m': [4.0],
+#                 #'rm_outliers_key': list(findsubsets2(set([0,1,2,3,4,5]))),
+#                 'rm_outliers_key': [[2,3,4,],],
+#                 'is_avg_or_median': [True, ],
+#                 ##'rm_n_head_days': range(31),
+#                 #'rm_n_head_days': [10, ],
+#                 #'rm_n_head_days_hours': [
+#                 #    #[],
+#                 #    #[(0, 6), (21, 22)],
+#                 #    #[(0, 5), (12, 15), (22, 24)],
+#                 #    [(0, 6), (12, 15), (21, 22)], ### 0.1750 public leader board
+#                 #    #[(0, 7), (11, 16), (20, 24)],
+#                 #    #[(0, 7), (12, 15), (22, 24)],
+#                 #    #[one, two , three]
+#                 #    #[(0, 7), (11, 16), (20, 22)], ### 
+#                 #    #[(0, 8), (10, 17), (19, 22)],
+#                 #    #for one in [(0, 6), (0, 5), (0, 7), (0, 8),]
+#                 #    #for two in [(10, 17), (11, 16), (12, 14), ]
+#                 #    #for three in [(19, 24), (20, 24), (21, 24), (22, 24)]
+#                 #],
+#              },
+
+#              {
+#                  "model": [
+#                            #LinearRegression,
+#                            #ARDRegression,
+#                            HuberRegressor,
+#                            #LogisticRegression,
+#                            #LogisticRegressionCV,
+#                            PassiveAggressiveRegressor,
+#                            #RandomizedLogisticRegression,
+#                            RANSACRegressor,
+#                            SGDRegressor,
+#                            TheilSenRegressor,
+#                            KNeighborsRegressor,
+#                            RadiusNeighborsRegressor,
+#                            MLPRegressor,
+#                            PLSRegression,
+#                            SVR,
+#                            LinearSVR,
+#                            NuSVR,
+#                            ],
+#                  'is_y_log': [True,],
+#                  'train_days': [45,],
+#                  'is_one_hot_encode': [False,],
+#                  'ft_select': [[0, 1, 2, 4, 5, 7,],],
+#                  #'is_rm_outliers': [True,],
+#                  #'rm_outliers_m': [ 4.0,],
+#              },
+#              {
+#                  "model": [BaggingRegressor, AdaBoostRegressor,],
+#                  "base_estimator": [
+#                      GradientBoostingRegressor(n_estimators=50,
+#                                                loss="lad",
+#                                                learning_rate=0.1,),
+#                      RandomForestRegressor(),
+#                                     ],
+#                  'train_days': [7,14,21,28,35,42,49,56,150],
+#                  #'train_days': [7,],
+#                  'is_rm_outliers': [True,],
+#                  'rm_outliers_m': [0.5, 1.0, 2.0, 3.0, 4.0,],
+#                  #'rm_outliers_m': [3.0,],
+#              },
+#              {
+#                 'model': [ExtraTreesRegressor,],
+#                 'n_estimators': [200,],
+#                 'train_days': [7,14,21,28,35,42,49,56,150],
+#                 'is_rm_outliers': [True,],
+#                 'rm_outliers_m': [0.5, 1.0, 2.0, 3.0, 4.0,],
+#                 'max_features': ['auto', 'sqrt', 'log2', None,]
+#              },
+#              {
+#                'model': [RandomForestRegressor,],
+#                'n_estimators': [50,],
+#                 'train_days': [7,14,21,28,35,42,49,56,150],
+#                 'is_rm_outliers': [True,],
+#                 'rm_outliers_m': [0.5, 1.0, 2.0, 3.0, 4.0,],
+#                 "dates_train": [dates_train,],
+#              },
+#              {
+#                 'model': [NonparametricKNN, ],
+#                 "n_neighbors": [1, 3, 5, 10, 15, 20,],
+#                 #"n_neighbors": [20,],
+#                 "loss": ["SMAPE", "L1"],
+#                 #"loss": ["SMAPE", ],
+#                  'train_days': [7, 14, 28,],
+#                  'is_rm_outliers': [True,],
+#                  'rm_outliers_m': [ 4.0,],
+#              },
+#              {
+#                  'model': [Lasso, ],
+#                  "alpha": [0.1,],
+#                  'train_days': [1,2,3,7, 14, 28,],
+#                  'is_rm_outliers': [True,],
+#                  'rm_outliers_m': [ 4.0,],
+#              },
+#              {
+#                  "model": [BaggingRegressor,],
+#                  "base_estimator": [
+#                      GradientBoostingRegressor(n_estimators=200,
+#                                                loss="lad",
+#                                                learning_rate=0.1,),
+#                                     ],
+#                  'train_days': [7,14,21,28,35,42,49,56,150],
+#                  'is_rm_outliers': [True,],
+#                  'rm_outliers_m': [0.5, 1.0, 2.0, 3.0, 4.0,],
+#              },
+            ],
+        },
+#        {
+#            "model": BaggingRegressor,
+#            "tuned_parameters":[
+#              {
+#                 "base_estimator": [None,
+#                    GradientBoostingRegressor(n_estimators=200, loss='lad', learning_rate=0.1),
+#                    ExtraTreesRegressor(), RandomForestRegressor()],
+#              },
+#            ],
+#        },
+#        {
+#            "model": AdaBoostRegressor,
+#            "tuned_parameters": [],
+#        },
+#        {
+#            "model": ExtraTreesRegressor,
+#            "tuned_parameters": [
+#              {
+#                #"criterion": ["mse", "mae"],
+#                "n_estimators": [200,]
+#              },
+#            ]
+#        },
+#        {
+#            "model": RandomForestRegressor,
+#            "tuned_parameters": [
+#              {"n_estimators": [200,]},
+#            ],
+#        },
+        #{
+        #    "model": SVR,
+        #    "tuned_parameters": [
+        #        #{'kernel': ['rbf'], 'gamma': [1e-3, 1e-4], 'C': [1, 10,]},
+        #        {y'kernel': ['linear'], 'C': [1, ]}]
+        #        #{'kernel': ['linear'], 'C': [1, 10, ]}]
+        #}
+    ]
+    print("GridSearchCVDatesWithVal X_train.shape=", X_train.shape)
+    predict_y_final = GridSearchCVDatesWithVal(
+        Configurations,
+        X_train, y_train, dates_train,
+        X_val, y_val, dates_val,
+        X_final,
+        is_y_log=is_y_log, is_boxcox=is_boxcox, boxcox_lambda=boxcox_lambda,
+        is_include_val_loss_for_eval=False, cv=6, days_to_test=7, skip_cvs=skip_cvs,
+        is_estimate_val=is_estimate_val, estimate_val_w=estimate_val_w,
+        is_include_future_training=is_include_future_training, remove_future_training_test=remove_future_training_test,
+        test_date_ranges=test_date_ranges, n_cores=n_cores)
+
+    ##output final output
+    path_final_res = os.path.join(
+        path_working_dir,
+        "travel_time_from_intersection_to_tollgates.csv")
+
+    print("*" * 60)
+    print("writing out final results...")
+    file_final_res = open(path_final_res, "w+")
+    file_final_res.writelines(','.join(['"intersection_id"',
+            '"tollgate_id"', '"time_window"', '"avg_travel_time"']) + '\n')
+    for iy, rinfo in enumerate(raw_info):
+        route_id = rinfo[0]
+        start_datetime = rinfo[1]
+        intersection_id, tollgate_id = route_id.split("-")
+        end_datetime = start_datetime + timedelta(minutes=20)
+        timewindow = "["+str(start_datetime) + "," + str(end_datetime)+ ")"
+        words = [intersection_id, tollgate_id, timewindow, str(predict_y_final[iy])]
+        line = '","'.join(words)
+        line = '"' + line + '"\n'
+        file_final_res.write(line)
+    file_final_res.close()

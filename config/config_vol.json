@@ -1,0 +1,8 @@
+{
+   "path_volumes_train": ["/home/jinpengli/work_data/jinpeng/dataSets/dataSets/training/volume(table 6)_training.csv", "/home/jinpengli/work_data/jinpeng/dataSet_phase2/volume(table 6)_training2.csv"],
+   "path_volumes_val": "/home/jinpengli/work_data/jinpeng/dataSet_phase2/volume(table 6)_test2.csv",
+   "weather_infos": ["/home/jinpengli/work_data/jinpeng/dataSets/dataSets/training/weather (table 7)_training_update.csv", "/home/jinpengli/work_data/jinpeng/dataSets/dataSets/testing_phase1/weather (table 7)_test1.csv", "/home/jinpengli/work_data/jinpeng/dataSet_phase2/weather (table 7)_2.csv"],
+   "path_links": "/home/jinpengli/work_data/jinpeng/dataSets/dataSets/training/links (table 3).csv",
+   "path_routes": "/home/jinpengli/work_data/jinpeng/dataSets/dataSets/training/routes (table 4).csv",
+   "working_dir": "/home/jinpengli/work_data/jinpeng"
+}
